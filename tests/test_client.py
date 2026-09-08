@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
+from websockets.asyncio.server import serve
 from websockets.datastructures import Headers
 from websockets.exceptions import InvalidMessage, InvalidStatus
 from websockets.http11 import Response
@@ -20,6 +21,48 @@ def test_gateway_config_defaults():
     # spurious empty_response failures.
     assert cfg.connect_timeout == 30.0
     assert cfg.request_timeout == 60.0
+
+
+@pytest.mark.asyncio
+async def test_gateway_client_connects_and_creates_session_over_websocket(monkeypatch):
+    monkeypatch.setenv("no_proxy", "127.0.0.1")
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+    requests = []
+    origins = []
+
+    async def gateway(websocket):
+        origins.append(websocket.request.headers["Origin"])
+        await websocket.send(
+            json.dumps({"type": "event", "event": "connect.challenge", "payload": {"nonce": ""}})
+        )
+        async for raw in websocket:
+            request = json.loads(raw)
+            requests.append(request)
+            payload = (
+                {"type": "hello-ok", "protocol": 3}
+                if request["method"] == "connect"
+                else {"sessionKey": "loopback-session"}
+            )
+            await websocket.send(
+                json.dumps({"type": "res", "id": request["id"], "ok": True, "payload": payload})
+            )
+
+    async with asyncio.timeout(10):
+        async with serve(gateway, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            config = GatewayConfig(
+                url=f"ws://127.0.0.1:{port}", connect_timeout=2, request_timeout=2
+            )
+            async with GatewayClient(config) as client:
+                session = await client.create_session(model="test/model", label="dependency-smoke")
+            assert client._ws is None
+
+    assert session == "loopback-session"
+    assert origins == [f"http://127.0.0.1:{port}"]
+    assert [request["method"] for request in requests] == ["connect", "sessions.create"]
+    assert requests[0]["params"]["minProtocol"] == 3
+    assert requests[0]["params"]["maxProtocol"] == 4
+    assert requests[1]["params"] == {"model": "test/model", "label": "dependency-smoke"}
 
 
 def test_set_session_auth_profile_override_patches_local_store(tmp_path: Path, monkeypatch):
@@ -174,6 +217,54 @@ def test_parser_accepts_codex_tool_search_output_shape():
     assert transcript.tool_call_sequence[0].output == "message: send a message"
     assert transcript.tool_call_sequence[1].output == "sent"
     assert transcript.tool_call_sequence[1].success is True
+
+
+def test_parser_accepts_kebab_case_codex_tool_search_blocks():
+    tool_message = _parse_single_message(
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool-search-call",
+                    "call_id": "search-2",
+                    "title": "tool_search",
+                    "parameters": {"query": "calendar"},
+                },
+                {
+                    "type": "tool-call",
+                    "tool_call_id": "call-2",
+                    "tool": "message",
+                    "args": {"text": "ok"},
+                },
+            ],
+        }
+    )
+    result_message = _parse_single_message(
+        {
+            "role": "tool",
+            "content": [
+                {
+                    "type": "tool-search-output",
+                    "call_id": "search-2",
+                    "content": [{"content": "message: available"}],
+                },
+                {
+                    "type": "tool-call-output",
+                    "tool_call_id": "call-2",
+                    "text": "delivered",
+                },
+            ],
+        }
+    )
+
+    transcript = _correlate_transcript(Transcript(messages=[tool_message, result_message]))  # type: ignore[arg-type]
+
+    assert [call.id for call in transcript.tool_call_sequence] == ["search-2", "call-2"]
+    assert [call.name for call in transcript.tool_call_sequence] == ["tool_search", "message"]
+    assert transcript.tool_call_sequence[0].input == {"query": "calendar"}
+    assert transcript.tool_call_sequence[0].output == "message: available"
+    assert transcript.tool_call_sequence[1].input == {"text": "ok"}
+    assert transcript.tool_call_sequence[1].output == "delivered"
 
 
 def test_parser_correlates_plain_top_level_tool_result_message():

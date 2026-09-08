@@ -4,7 +4,7 @@ from pathlib import Path
 def test_ci_uses_blacksmith_for_openclaw_with_fork_fallback():
     workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
 
-    assert "blacksmith-8vcpu-ubuntu-2404" in workflow
+    assert "blacksmith-4vcpu-ubuntu-2404" in workflow
     assert "ubuntu-latest" in workflow
     assert "github.repository_owner == 'openclaw'" in workflow
 
@@ -39,7 +39,7 @@ def test_crabbox_workflow_hydrates_secrets_dotfiles_and_ready_marker():
     assert "crabbox_id:" in workflow
     assert "crabbox_runner_label:" in workflow
     assert 'runs-on: [self-hosted, "${{ inputs.crabbox_runner_label }}"]' in workflow
-    assert "actions/setup-python@v5" in workflow
+    assert "actions/setup-python@v7.0.0" in workflow
     assert "python -m pip install -e ." in workflow
     assert "scripts/ci-hydrate-testbox-env.sh" in workflow
     assert "HF_TOKEN" in workflow
